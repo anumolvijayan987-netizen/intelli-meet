@@ -38,6 +38,7 @@ export default function App() {
   const [roomId, setRoomId] = useState('')
   const [copiedLink, setCopiedLink] = useState(false)
   const [participantsCount, setParticipantsCount] = useState(1)
+  const [peers, setPeers] = useState([])
 
   // Past Meetings & Database State
   const [pastMeetings, setPastMeetings] = useState([])
@@ -117,6 +118,7 @@ export default function App() {
 
       socket.on('user-joined', ({ userName: peerName, time }) => {
         setParticipantsCount(prev => prev + 1)
+        setPeers(prev => [...prev, { id: Date.now() + Math.random(), name: peerName }])
         setMessages(prev => [
           ...prev,
           {
@@ -354,6 +356,7 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
     const randomCode = 'meet-' + Math.random().toString(36).substring(2, 7)
     setRoomId(randomCode)
     setParticipantsCount(1)
+    setPeers([])
     setMessages([])
     setTranscript([])
     setCurrentScreen('meeting')
@@ -363,7 +366,8 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
     e.preventDefault()
     if (!userName.trim()) return alert('Please enter your name!')
     if (!roomId.trim()) return alert('Please enter a room code!')
-    setParticipantsCount(2)
+    setParticipantsCount(1)
+    setPeers([])
     setMessages([])
     setTranscript([])
     setCurrentScreen('meeting')
@@ -686,15 +690,36 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
               )}
             </div>
 
-            {/* Peer / Participant Video Card */}
-            <div className="video-card">
-              <div className="avatar-placeholder" style={{ background: 'linear-gradient(135deg, #0ea5e9, #2563eb)' }}>
-                SP
+            {/* Real Remote Participants (Dynamically added when someone joins) */}
+            {peers.map((peer) => (
+              <div key={peer.id} className="video-card">
+                <div className="avatar-placeholder" style={{ background: 'linear-gradient(135deg, #0ea5e9, #2563eb)' }}>
+                  {(peer.name || 'P')[0].toUpperCase()}
+                </div>
+                <div className="card-overlay">
+                  <span>{peer.name}</span>
+                </div>
               </div>
-              <div className="card-overlay">
-                <span>Shaurya Pandey (Mentor)</span>
+            ))}
+
+            {/* If alone in the meeting: Show a clean waiting card instead of a hardcoded person */}
+            {peers.length === 0 && (
+              <div className="video-card" style={{ border: '1px dashed #374151', background: 'rgba(17, 24, 39, 0.4)' }}>
+                <div style={{ textAlign: 'center', padding: '24px' }}>
+                  <div style={{ width: '56px', height: '56px', borderRadius: '50%', background: '#1f2937', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px', color: '#94a3b8' }}>
+                    <Users size={24} />
+                  </div>
+                  <h4 style={{ color: '#e2e8f0', fontSize: '15px', marginBottom: '6px' }}>Waiting for others to join</h4>
+                  <p style={{ color: '#64748b', fontSize: '12px', marginBottom: '14px' }}>Share this meeting code with your team:</p>
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: '#1f2937', padding: '6px 14px', borderRadius: '8px', border: '1px solid #374151' }}>
+                    <strong style={{ color: '#818cf8', fontSize: '13px' }}>{roomId}</strong>
+                    <button onClick={handleCopyLink} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                      {copiedLink ? <CheckCircle2 size={14} color="#10b981" /> : <Copy size={14} />}
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* AI Assistant Card */}
             <div className="video-card ai-card">
