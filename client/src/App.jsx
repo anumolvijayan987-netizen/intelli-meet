@@ -53,6 +53,7 @@ export default function App() {
   // Real Hardware Stream Ref & State
   const localVideoRef = useRef(null)
   const [stream, setStream] = useState(null)
+  const screenStreamRef = useRef(null)
 
   // Socket.io Real-time Connection Ref
   const socketRef = useRef(null)
@@ -243,11 +244,16 @@ export default function App() {
     }
   }, [currentScreen])
 
+  // Synchronize local video element with camera or screen stream
   useEffect(() => {
-    if (stream && localVideoRef.current && isCamOn) {
-      localVideoRef.current.srcObject = stream
+    if (localVideoRef.current) {
+      if (isScreenSharing && screenStreamRef.current) {
+        localVideoRef.current.srcObject = screenStreamRef.current
+      } else if (isCamOn && stream) {
+        localVideoRef.current.srcObject = stream
+      }
     }
-  }, [stream, isCamOn])
+  }, [stream, isCamOn, isScreenSharing])
 
   // Controls
   const toggleMic = () => {
@@ -266,29 +272,43 @@ export default function App() {
     }
   }
 
+  // Robust Screen Sharing with getDisplayMedia
   const toggleScreenShare = async () => {
     if (!isScreenSharing) {
       try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always' },
+          audio: false
+        })
+
+        screenStreamRef.current = screenStream
+        setIsScreenSharing(true)
+
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = screenStream
         }
-        setIsScreenSharing(true)
 
+        // When user stops sharing using browser floating bar or taskbar
         screenStream.getVideoTracks()[0].onended = () => {
-          setIsScreenSharing(false)
-          if (localVideoRef.current && stream) {
-            localVideoRef.current.srcObject = stream
-          }
+          stopScreenSharing()
         }
       } catch (err) {
-        console.warn('Screen share canceled:', err)
+        console.warn('Screen share canceled or denied:', err)
+        setIsScreenSharing(false)
       }
     } else {
-      setIsScreenSharing(false)
-      if (localVideoRef.current && stream) {
-        localVideoRef.current.srcObject = stream
-      }
+      stopScreenSharing()
+    }
+  }
+
+  const stopScreenSharing = () => {
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop())
+      screenStreamRef.current = null
+    }
+    setIsScreenSharing(false)
+    if (localVideoRef.current && stream && isCamOn) {
+      localVideoRef.current.srcObject = stream
     }
   }
 
@@ -658,14 +678,17 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
           <section className="video-stage">
             {/* User Video Card (Live Webcam Feed) */}
             <div className={`video-card ${isMicOn ? 'speaking' : ''}`}>
-              {isCamOn ? (
+              {(isCamOn || isScreenSharing) ? (
                 <video
                   ref={localVideoRef}
                   autoPlay
                   playsInline
                   muted
                   className="video-element"
-                  style={{ transform: isScreenSharing ? 'none' : 'scaleX(-1)' }}
+                  style={{
+                    transform: isScreenSharing ? 'none' : 'scaleX(-1)',
+                    objectFit: isScreenSharing ? 'contain' : 'cover'
+                  }}
                 />
               ) : (
                 <div className="avatar-placeholder">
@@ -674,7 +697,7 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
               )}
 
               <div className="card-overlay">
-                <span>{userName || 'You'} (Host)</span>
+                <span>{isScreenSharing ? '🖥️ You (Presenting Screen)' : `${userName || 'You'} (Host)`}</span>
               </div>
 
               <div className="card-status">
@@ -910,9 +933,9 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
 
           {/* Screen Share */}
           <button
-            className={`btn-ctrl ${isScreenSharing ? 'off' : ''}`}
+            className={`btn-ctrl ${isScreenSharing ? 'active-blue' : ''}`}
             onClick={toggleScreenShare}
-            title="Share Screen"
+            title={isScreenSharing ? 'Stop Screen Sharing' : 'Share Screen'}
           >
             <MonitorUp size={20} />
           </button>
