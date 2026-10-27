@@ -867,3 +867,212 @@ body {
 .spin {
   animation: rotate 1.5s linear infinite;
 }
+
+/* =========================================
+   MOBILE & TABLET RESPONSIVE STYLES
+   ========================================= */
+@media (max-width: 768px) {
+  /* Home / Landing Screen on Mobile */
+  .home-nav {
+    padding: 0 16px;
+    height: 56px;
+  }
+
+  .home-content {
+    padding: 24px 14px 40px;
+  }
+
+  .hero-pill {
+    font-size: 11px;
+    padding: 4px 12px;
+    margin-bottom: 16px;
+  }
+
+  .hero-title {
+    font-size: 28px;
+    letter-spacing: -0.5px;
+    margin-bottom: 12px;
+  }
+
+  .hero-subtitle {
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+
+  .join-card {
+    padding: 20px 16px;
+    border-radius: 16px;
+  }
+
+  .feature-row {
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 24px;
+    align-items: center;
+  }
+
+  .past-meetings-section {
+    margin-top: 32px;
+    padding: 0 6px;
+  }
+
+  .past-meetings-title {
+    font-size: 15px;
+  }
+
+  .past-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  /* Meeting Room on Mobile */
+  .meet-header {
+    height: 52px;
+    padding: 0 12px;
+  }
+
+  .brand-title {
+    font-size: 15px;
+  }
+
+  .brand-icon {
+    width: 30px;
+    height: 30px;
+    font-size: 14px;
+  }
+
+  .brand-badge {
+    display: none; /* Hide small badge to save header space */
+  }
+
+  .room-pill {
+    font-size: 11px;
+    padding: 4px 10px;
+    gap: 6px;
+  }
+
+  /* Main Stage Stacking on Phone */
+  .meet-main {
+    flex-direction: column;
+    overflow: hidden;
+    height: calc(100vh - 52px - 62px);
+  }
+
+  .video-stage-wrapper {
+    flex: none;
+    height: 42vh;
+    min-height: 200px;
+  }
+
+  .video-stage {
+    padding: 8px;
+    gap: 8px;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+
+  .video-card {
+    height: 100%;
+    min-height: 120px;
+    max-height: 200px;
+    border-radius: 10px;
+  }
+
+  .avatar-placeholder {
+    width: 48px;
+    height: 48px;
+    font-size: 18px;
+  }
+
+  .card-overlay {
+    bottom: 6px;
+    left: 6px;
+    font-size: 10px;
+    padding: 3px 6px;
+  }
+
+  .card-status {
+    top: 6px;
+    right: 6px;
+  }
+
+  .status-badge {
+    padding: 4px;
+  }
+
+  .live-caption-bar {
+    bottom: 8px;
+    max-width: 94%;
+    padding: 4px 12px;
+    font-size: 12px;
+  }
+
+  /* Side Panel as Bottom Half on Phone */
+  .side-panel {
+    width: 100%;
+    flex: 1;
+    border-left: none;
+    border-top: 1px solid #1f2937;
+    overflow: hidden;
+  }
+
+  .tab-btn {
+    padding: 10px;
+    font-size: 12px;
+  }
+
+  .tab-content {
+    padding: 10px;
+    gap: 8px;
+  }
+
+  /* Bottom Controls on Mobile */
+  .meet-controls {
+    height: 62px;
+    padding: 0 8px;
+    justify-content: space-between;
+  }
+
+  .control-group {
+    gap: 4px;
+  }
+
+  .control-group .participant-text {
+    display: none; /* Hide participant text on phone, keep icon only */
+  }
+
+  .btn-ctrl {
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+  }
+
+  .btn-ctrl svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .btn-ai {
+    padding: 0 8px;
+    height: 38px;
+    font-size: 11px;
+    gap: 4px;
+  }
+
+  .btn-end {
+    padding: 0 10px;
+    height: 38px;
+    font-size: 12px;
+    gap: 4px;
+  }
+
+  /* Modal on Phone */
+  .modal-overlay {
+    padding: 12px;
+  }
+
+  .modal-content {
+    padding: 16px;
+    max-height: 90vh;
+    border-radius: 14px;
+  }
+}
