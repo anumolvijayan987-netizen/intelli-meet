@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import PeerJS from 'peerjs'
 import { io } from 'socket.io-client'
 import {
   Mic,
@@ -15,7 +16,6 @@ import {
   CheckCircle2,
   ListTodo,
   Video as VideoIcon,
-  ShieldCheck,
   Zap,
   ArrowRight,
   AlertCircle,
@@ -24,18 +24,61 @@ import {
   Check,
   ClipboardList,
   History,
-  Calendar,
   X
 } from 'lucide-react'
 import './App.css'
+
+// Resolve PeerJS class cleanly across both ESM and CJS bundles
+const Peer = PeerJS?.Peer || PeerJS?.default?.Peer || PeerJS?.default || PeerJS
+
+// Fallback dummy stream creator for when camera permissions are pending or denied
+function createDummyStream() {
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = 640
+    canvas.height = 480
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
+      ctx.fillStyle = '#0f172a'
+      ctx.fillRect(0, 0, 640, 480)
+    }
+    return canvas.captureStream ? canvas.captureStream(5) : new MediaStream()
+  } catch (_) {
+    return new MediaStream()
+  }
+}
+
+// Remote Video Component for Live WebRTC Peer Streams
+function RemoteVideo({ stream }) {
+  const videoRef = useRef(null)
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream
+    }
+  }, [stream])
+
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      className="video-element"
+      style={{ objectFit: 'cover' }}
+    />
+  )
+}
 
 export default function App() {
   // Navigation State ('home' or 'meeting')
   const [currentScreen, setCurrentScreen] = useState('home')
 
-  // User Profile & Room Info
-  const [userName, setUserName] = useState('Anumol Vijayan')
+  // User Profile & Room Info (Preserves individual device name in localStorage)
+  const [userName, setUserName] = useState(() => {
+    return localStorage.getItem('intellimeet_username') || ''
+  })
   const [roomId, setRoomId] = useState('')
+  const [hasInviteFromUrl, setHasInviteFromUrl] = useState(false)
   const [copiedLink, setCopiedLink] = useState(false)
   const [participantsCount, setParticipantsCount] = useState(1)
   const [peers, setPeers] = useState([])
@@ -50,12 +93,16 @@ export default function App() {
   const [isScreenSharing, setIsScreenSharing] = useState(false)
   const [cameraError, setCameraError] = useState(null)
 
-  // Real Hardware Stream Ref & State
+  // Real Hardware Stream Refs
   const localVideoRef = useRef(null)
   const [stream, setStream] = useState(null)
+  const streamRef = useRef(null)
   const screenStreamRef = useRef(null)
 
-  // Socket.io Real-time Connection Ref
+  // Real-time Connection Refs (PeerJS Cloud WebRTC + Socket.io fallback)
+  const peerInstanceRef = useRef(null)
+  const connectionsRef = useRef({})
+  const callsRef = useRef({})
   const socketRef = useRef(null)
 
   // Live Speech-to-Text Transcription State
@@ -76,16 +123,16 @@ export default function App() {
   const [isGeneratingAI, setIsGeneratingAI] = useState(false)
   const [copiedNotes, setCopiedNotes] = useState(false)
   const [aiSummary, setAiSummary] = useState(
-    'Welcome to IntelliMeet! Click "Generate AI Summary" at any time or as you speak to analyze live transcripts and extract action items.'
+    'Welcome to IntelliMeet! Click "AI Assistant" at any time to analyze live conversation, extract decisions, and generate task action items.'
   )
   const [keyDecisions, setKeyDecisions] = useState([
-    'Agreed on MERN stack implementation for enterprise scalability',
-    'Using WebRTC for peer-to-peer video streaming and Socket.io for messaging'
+    'Agreed on MERN stack architecture with PeerJS WebRTC cloud mesh for multi-device calling',
+    'Integrated Web Speech API for zero-latency client-side transcription'
   ])
   const [actionItems, setActionItems] = useState([
-    { id: 1, text: 'Configure WebRTC signaling server with Socket.io', assignee: 'Engineering Team', completed: true },
-    { id: 2, text: 'Connect MongoDB database to save meeting minutes permanently', assignee: 'Anumol', completed: false },
-    { id: 3, text: 'Deploy web client to Vercel and backend to Render', assignee: 'DevOps', completed: false }
+    { id: 1, text: 'Validate peer-to-peer WebRTC connection across separate devices', assignee: 'Engineering Team', completed: true },
+    { id: 2, text: 'Connect MongoDB database to archive meeting minutes permanently', assignee: 'Anumol', completed: false },
+    { id: 3, text: 'Deploy web client to Vercel production with SPA routing', assignee: 'DevOps', completed: true }
   ])
 
   // Sample Seed Meetings for immediate display on Mobile and Cloud
@@ -95,10 +142,10 @@ export default function App() {
       roomId: 'sprint-architecture-review',
       hostName: 'Anumol Vijayan',
       participants: ['Anumol Vijayan', 'Shaurya Pandey (Mentor)'],
-      summary: 'Executive Sprint Review: Validated MERN architecture, WebRTC video calling pipeline, and autonomous OpenAI note-taking integration for modern enterprise teams.',
+      summary: 'Sprint Review: Validated MERN architecture, PeerJS WebRTC cross-device video calling pipeline, and autonomous AI note-taking integration for modern enterprise teams.',
       keyDecisions: [
         'Confirmed Vite React frontend with Vercel cloud continuous deployment',
-        'Adopted Socket.io room partitioning for sub-second signaling and live chat',
+        'Adopted PeerJS WebRTC cloud broker for direct browser-to-browser media streaming',
         'Integrated HTML5 Web Speech API for zero-lag client-side transcription'
       ],
       actionItems: [
@@ -126,88 +173,399 @@ export default function App() {
   ]
 
   // ========================================================
-  // LOAD PAST MEETINGS (HYBRID: DATABASE + LOCALSTORAGE)
+  // 1. PARSE URL INVITATION QUERY PARAMS ON MOUNT
+  // ========================================================
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search)
+      const roomParam = params.get('room')
+      if (roomParam) {
+        setRoomId(roomParam.trim())
+        setHasInviteFromUrl(true)
+      }
+    } catch (err) {
+      console.warn('URL params parsing failed:', err)
+    }
+  }, [])
+
+  // Sync participant count with peers list
+  useEffect(() => {
+    setParticipantsCount(peers.length + 1)
+  }, [peers])
+
+  // ========================================================
+  // 2. LOAD PAST MEETINGS (HYBRID: DATABASE + LOCALSTORAGE)
   // ========================================================
   useEffect(() => {
     if (currentScreen === 'home') {
-      fetch('http://localhost:5000/api/meetings')
-        .then(res => {
-          if (!res.ok) throw new Error('Network error')
-          return res.json()
-        })
-        .then(data => {
-          if (Array.isArray(data) && data.length > 0) {
-            setPastMeetings(data)
-            return
-          }
-          throw new Error('Fallback to local')
-        })
-        .catch(() => {
-          // Reliable fallback for Vercel deployment, mobile phones, and offline mode
-          try {
-            const localSaved = JSON.parse(localStorage.getItem('intellimeet_past_meetings') || '[]')
-            if (localSaved.length > 0) {
-              setPastMeetings(localSaved)
-            } else {
-              setPastMeetings(DEFAULT_MEETINGS)
-              localStorage.setItem('intellimeet_past_meetings', JSON.stringify(DEFAULT_MEETINGS))
+      const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      if (isLocal) {
+        fetch('http://localhost:5000/api/meetings')
+          .then(res => {
+            if (!res.ok) throw new Error('Network error')
+            return res.json()
+          })
+          .then(data => {
+            if (Array.isArray(data) && data.length > 0) {
+              setPastMeetings(data)
+              return
             }
-          } catch (_) {
-            setPastMeetings(DEFAULT_MEETINGS)
-          }
-        })
+            throw new Error('Fallback to local')
+          })
+          .catch(() => loadFromLocalStorage())
+      } else {
+        loadFromLocalStorage()
+      }
+    }
+
+    function loadFromLocalStorage() {
+      try {
+        const localSaved = JSON.parse(localStorage.getItem('intellimeet_past_meetings') || '[]')
+        if (localSaved.length > 0) {
+          setPastMeetings(localSaved)
+        } else {
+          setPastMeetings(DEFAULT_MEETINGS)
+          localStorage.setItem('intellimeet_past_meetings', JSON.stringify(DEFAULT_MEETINGS))
+        }
+      } catch (_) {
+        setPastMeetings(DEFAULT_MEETINGS)
+      }
     }
   }, [currentScreen])
 
   // ========================================================
-  // SOCKET.IO REAL-TIME CONNECTION
+  // 3. WEBRTC HARDWARE CAMERA & MICROPHONE ACCESS
   // ========================================================
   useEffect(() => {
-    if (currentScreen === 'meeting' && roomId) {
-      const socket = io('http://localhost:5000')
-      socketRef.current = socket
+    let currentStream = null
 
-      socket.on('connect', () => {
-        socket.emit('join-room', {
-          roomId: roomId,
-          userName: userName || 'Anonymous'
-        })
+    if (currentScreen === 'meeting') {
+      const startCamera = async () => {
+        try {
+          setCameraError(null)
+          const userMediaStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true
+          })
+
+          currentStream = userMediaStream
+          streamRef.current = userMediaStream
+          setStream(userMediaStream)
+
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = userMediaStream
+          }
+
+          // Update active peer calls with real stream tracks once acquired
+          const videoTrack = userMediaStream.getVideoTracks()[0]
+          const audioTrack = userMediaStream.getAudioTracks()[0]
+          Object.values(callsRef.current).forEach(call => {
+            try {
+              const senders = call.peerConnection?.getSenders?.() || []
+              senders.forEach(sender => {
+                if (sender.track?.kind === 'video' && videoTrack) {
+                  sender.replaceTrack(videoTrack).catch(() => {})
+                }
+                if (sender.track?.kind === 'audio' && audioTrack) {
+                  sender.replaceTrack(audioTrack).catch(() => {})
+                }
+              })
+            } catch (_) {}
+          })
+        } catch (err) {
+          console.error('Camera/Mic permission warning:', err)
+          setCameraError('Camera/Mic permission not granted. Running in audio-only or spectator mode.')
+        }
+      }
+
+      startCamera()
+    }
+
+    return () => {
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop())
+      }
+    }
+  }, [currentScreen])
+
+  // Synchronize local video element with camera or screen stream
+  useEffect(() => {
+    if (localVideoRef.current) {
+      if (isScreenSharing && screenStreamRef.current) {
+        localVideoRef.current.srcObject = screenStreamRef.current
+      } else if (isCamOn && stream) {
+        localVideoRef.current.srcObject = stream
+      }
+    }
+  }, [stream, isCamOn, isScreenSharing])
+
+  // ========================================================
+  // 4. PEERJS CLOUD WEBRTC MESH (CROSS-DEVICE / PUBLIC CLOUD)
+  // ========================================================
+  useEffect(() => {
+    if (currentScreen !== 'meeting' || !roomId) return
+
+    let isCancelled = false
+    const safeRoom = roomId.toLowerCase().replace(/[^a-z0-9_-]/g, '')
+    const currentUserName = userName.trim() || 'Participant'
+
+    const addOrUpdatePeer = (peerId, peerName, remoteStream = null) => {
+      setPeers(prev => {
+        const existing = prev.find(p => p.id === peerId)
+        if (existing) {
+          return prev.map(p =>
+            p.id === peerId
+              ? {
+                  ...p,
+                  name: peerName || p.name,
+                  stream: remoteStream || p.stream
+                }
+              : p
+          )
+        }
+        return [
+          ...prev,
+          {
+            id: peerId,
+            name: peerName || 'Participant',
+            stream: remoteStream
+          }
+        ]
       })
+    }
 
-      socket.on('user-joined', ({ userName: peerName, time }) => {
-        setParticipantsCount(prev => prev + 1)
-        setPeers(prev => [...prev, { id: Date.now() + Math.random(), name: peerName }])
+    const removePeer = (peerId, peerName = '') => {
+      if (connectionsRef.current[peerId]) {
+        try { connectionsRef.current[peerId].close() } catch (_) {}
+        delete connectionsRef.current[peerId]
+      }
+      if (callsRef.current[peerId]) {
+        try { callsRef.current[peerId].close() } catch (_) {}
+        delete callsRef.current[peerId]
+      }
+      setPeers(prev => prev.filter(p => p.id !== peerId))
+      if (peerName) {
         setMessages(prev => [
           ...prev,
           {
             id: Date.now() + Math.random(),
             sender: 'System',
-            time: time,
-            text: `👋 ${peerName} joined the meeting room.`,
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            text: `👋 ${peerName} left the meeting room.`,
             isSystem: true
           }
         ])
+      }
+    }
+
+    const setupDataConnection = (conn) => {
+      connectionsRef.current[conn.peer] = conn
+
+      conn.on('open', () => {
+        conn.send({
+          type: 'intro',
+          userName: currentUserName
+        })
       })
 
-      socket.on('receive-message', (incomingMsg) => {
-        setMessages(prev => [...prev, incomingMsg])
+      conn.on('data', (data) => {
+        if (!data || typeof data !== 'object') return
+
+        if (data.type === 'intro') {
+          const remoteName = data.userName || 'Participant'
+          addOrUpdatePeer(conn.peer, remoteName)
+          setMessages(prev => [
+            ...prev,
+            {
+              id: Date.now() + Math.random(),
+              sender: 'System',
+              time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              text: `👋 ${remoteName} joined the meeting room.`,
+              isSystem: true
+            }
+          ])
+        } else if (data.type === 'chat' && data.message) {
+          setMessages(prev => {
+            if (prev.some(m => m.id === data.message.id)) return prev
+            return [...prev, data.message]
+          })
+        } else if (data.type === 'transcript' && data.chunk) {
+          setTranscript(prev => [...prev, data.chunk])
+          setLiveSubtitle(data.chunk.text)
+          setLiveSubtitleSpeaker(data.chunk.speaker)
+          setTimeout(() => setLiveSubtitle(''), 5000)
+        } else if (data.type === 'peer-discovery' && Array.isArray(data.peers)) {
+          data.peers.forEach(otherPeerId => {
+            if (otherPeerId !== peerInstanceRef.current?.id && !connectionsRef.current[otherPeerId]) {
+              connectToRemotePeer(otherPeerId)
+            }
+          })
+        }
       })
 
-      socket.on('receive-transcript', (chunk) => {
-        setTranscript(prev => [...prev, chunk])
-        setLiveSubtitle(chunk.text)
-        setLiveSubtitleSpeaker(chunk.speaker)
-        setTimeout(() => setLiveSubtitle(''), 5000)
+      conn.on('close', () => removePeer(conn.peer))
+      conn.on('error', () => removePeer(conn.peer))
+    }
+
+    const setupMediaCall = (call) => {
+      callsRef.current[call.peer] = call
+
+      call.on('stream', (remoteStream) => {
+        addOrUpdatePeer(call.peer, call.metadata?.userName, remoteStream)
       })
 
-      return () => {
-        socket.disconnect()
+      call.on('close', () => removePeer(call.peer))
+      call.on('error', () => removePeer(call.peer))
+    }
+
+    const connectToRemotePeer = (targetPeerId) => {
+      if (!peerInstanceRef.current || peerInstanceRef.current.destroyed) return
+      if (connectionsRef.current[targetPeerId]) return
+
+      // 1. Establish Data Connection
+      const conn = peerInstanceRef.current.connect(targetPeerId, {
+        metadata: { userName: currentUserName }
+      })
+      setupDataConnection(conn)
+
+      // 2. Establish Media Call
+      const myStream = streamRef.current || createDummyStream()
+      const call = peerInstanceRef.current.call(targetPeerId, myStream, {
+        metadata: { userName: currentUserName }
+      })
+      setupMediaCall(call)
+    }
+
+    const hostPeerId = `im-host-${safeRoom}`
+
+    const initGuestPeer = () => {
+      if (isCancelled) return
+      const guestPeerId = `im-guest-${safeRoom}-${Math.random().toString(36).substring(2, 7)}`
+      const guestPeer = new Peer(guestPeerId)
+      peerInstanceRef.current = guestPeer
+
+      guestPeer.on('open', () => {
+        connectToRemotePeer(hostPeerId)
+      })
+
+      guestPeer.on('connection', (conn) => {
+        setupDataConnection(conn)
+      })
+
+      guestPeer.on('call', (call) => {
+        const myStream = streamRef.current || createDummyStream()
+        call.answer(myStream)
+        setupMediaCall(call)
+      })
+
+      guestPeer.on('error', (err) => {
+        console.warn('Guest peer notice:', err)
+      })
+    }
+
+    const initHostPeer = () => {
+      const hostPeer = new Peer(hostPeerId)
+      peerInstanceRef.current = hostPeer
+
+      hostPeer.on('open', () => {
+        console.log('Room host initialized successfully on PeerJS broker')
+      })
+
+      hostPeer.on('connection', (conn) => {
+        setupDataConnection(conn)
+
+        conn.on('open', () => {
+          const otherPeerIds = Object.keys(connectionsRef.current).filter(pId => pId !== conn.peer)
+          if (otherPeerIds.length > 0) {
+            conn.send({
+              type: 'peer-discovery',
+              peers: otherPeerIds
+            })
+          }
+        })
+      })
+
+      hostPeer.on('call', (call) => {
+        const myStream = streamRef.current || createDummyStream()
+        call.answer(myStream)
+        setupMediaCall(call)
+      })
+
+      hostPeer.on('error', (err) => {
+        if (err.type === 'unavailable-id') {
+          // Host anchor is already active. Automatically register as guest peer!
+          try { hostPeer.destroy() } catch (_) {}
+          initGuestPeer()
+        } else {
+          console.warn('Host peer notice:', err)
+        }
+      })
+    }
+
+    initHostPeer()
+
+    return () => {
+      isCancelled = true
+      Object.values(connectionsRef.current).forEach(c => {
+        try { c.close() } catch (_) {}
+      })
+      Object.values(callsRef.current).forEach(c => {
+        try { c.close() } catch (_) {}
+      })
+      connectionsRef.current = {}
+      callsRef.current = {}
+      if (peerInstanceRef.current) {
+        try { peerInstanceRef.current.destroy() } catch (_) {}
+        peerInstanceRef.current = null
       }
     }
   }, [currentScreen, roomId, userName])
 
   // ========================================================
-  // SPEECH-TO-TEXT (WEB SPEECH API)
+  // 5. OPTIONAL LOCAL SOCKET.IO (FOR VIVA / BACKEND TESTING)
+  // ========================================================
+  useEffect(() => {
+    if (currentScreen === 'meeting' && roomId) {
+      const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      if (!isLocal) return
+
+      try {
+        const socket = io('http://localhost:5000', {
+          transports: ['websocket', 'polling'],
+          timeout: 2500
+        })
+        socketRef.current = socket
+
+        socket.on('connect', () => {
+          socket.emit('join-room', {
+            roomId: roomId,
+            userName: userName || 'Anonymous'
+          })
+        })
+
+        socket.on('receive-message', (incomingMsg) => {
+          setMessages(prev => {
+            if (prev.some(m => m.id === incomingMsg.id)) return prev
+            return [...prev, incomingMsg]
+          })
+        })
+
+        socket.on('receive-transcript', (chunk) => {
+          setTranscript(prev => [...prev, chunk])
+          setLiveSubtitle(chunk.text)
+          setLiveSubtitleSpeaker(chunk.speaker)
+          setTimeout(() => setLiveSubtitle(''), 5000)
+        })
+
+        return () => {
+          socket.disconnect()
+        }
+      } catch (_) {}
+    }
+  }, [currentScreen, roomId, userName])
+
+  // ========================================================
+  // 6. SPEECH-TO-TEXT (HTML5 WEB SPEECH API)
   // ========================================================
   useEffect(() => {
     if (currentScreen === 'meeting' && isTranscribing && isMicOn) {
@@ -236,19 +594,33 @@ export default function App() {
               }
 
               setTranscript(prev => [...prev, chunk])
-              socketRef.current?.emit('transcript-chunk', { roomId, transcriptData: chunk })
+
+              // Broadcast live transcript to connected peers via WebRTC data channel
+              Object.values(connectionsRef.current).forEach(conn => {
+                if (conn && conn.open) {
+                  try {
+                    conn.send({ type: 'transcript', chunk })
+                  } catch (_) {}
+                }
+              })
+
+              // Emit to local socket if active
+              if (socketRef.current?.connected) {
+                socketRef.current.emit('transcript-chunk', { roomId, transcriptData: chunk })
+              }
+
               setTimeout(() => setLiveSubtitle(''), 5000)
             }
           }
 
           recognition.onerror = (e) => {
-            console.warn('Speech recognition status:', e.error)
+            console.warn('Speech recognition notice:', e.error)
           }
 
           recognition.start()
           recognitionRef.current = recognition
         } catch (err) {
-          console.warn('Speech recognition init error:', err)
+          console.warn('Speech recognition init notice:', err)
         }
       }
     } else {
@@ -265,54 +637,8 @@ export default function App() {
   }, [currentScreen, isTranscribing, isMicOn, roomId, userName])
 
   // ========================================================
-  // WEBRTC HARDWARE ACCESS
+  // 7. HARDWARE MEDIA TOGGLES & SCREEN SHARING
   // ========================================================
-  useEffect(() => {
-    let currentStream = null
-
-    if (currentScreen === 'meeting') {
-      const startCamera = async () => {
-        try {
-          setCameraError(null)
-          const userMediaStream = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: true
-          })
-
-          currentStream = userMediaStream
-          setStream(userMediaStream)
-
-          if (localVideoRef.current) {
-            localVideoRef.current.srcObject = userMediaStream
-          }
-        } catch (err) {
-          console.error('Error accessing camera/mic:', err)
-          setCameraError('Camera/Mic permission denied or not available.')
-        }
-      }
-
-      startCamera()
-    }
-
-    return () => {
-      if (currentStream) {
-        currentStream.getTracks().forEach(track => track.stop())
-      }
-    }
-  }, [currentScreen])
-
-  // Synchronize local video element with camera or screen stream
-  useEffect(() => {
-    if (localVideoRef.current) {
-      if (isScreenSharing && screenStreamRef.current) {
-        localVideoRef.current.srcObject = screenStreamRef.current
-      } else if (isCamOn && stream) {
-        localVideoRef.current.srcObject = stream
-      }
-    }
-  }, [stream, isCamOn, isScreenSharing])
-
-  // Controls
   const toggleMic = () => {
     const nextState = !isMicOn
     setIsMicOn(nextState)
@@ -329,7 +655,6 @@ export default function App() {
     }
   }
 
-  // Robust Screen Sharing with getDisplayMedia
   const toggleScreenShare = async () => {
     if (!isScreenSharing) {
       try {
@@ -345,7 +670,17 @@ export default function App() {
           localVideoRef.current.srcObject = screenStream
         }
 
-        // When user stops sharing using browser floating bar or taskbar
+        // Seamlessly switch video track on all remote peer connections
+        const screenTrack = screenStream.getVideoTracks()[0]
+        if (screenTrack) {
+          Object.values(callsRef.current).forEach(call => {
+            try {
+              const sender = call.peerConnection?.getSenders?.()?.find(s => s.track?.kind === 'video')
+              if (sender) sender.replaceTrack(screenTrack)
+            } catch (_) {}
+          })
+        }
+
         screenStream.getVideoTracks()[0].onended = () => {
           stopScreenSharing()
         }
@@ -367,59 +702,69 @@ export default function App() {
     if (localVideoRef.current && stream && isCamOn) {
       localVideoRef.current.srcObject = stream
     }
+
+    // Switch back to webcam track on all remote peer connections
+    const camTrack = streamRef.current?.getVideoTracks()[0]
+    if (camTrack) {
+      Object.values(callsRef.current).forEach(call => {
+        try {
+          const sender = call.peerConnection?.getSenders?.()?.find(s => s.track?.kind === 'video')
+          if (sender) sender.replaceTrack(camTrack)
+        } catch (_) {}
+      })
+    }
   }
 
   // ========================================================
-  // AI SUMMARIZATION TRIGGER (HYBRID: SERVER + BROWSER NLP)
+  // 8. AI SUMMARIZATION TRIGGER (HYBRID: SERVER + CLIENT NLP)
   // ========================================================
   const handleGenerateAISummary = async () => {
     setIsGeneratingAI(true)
     setActiveTab('ai')
 
-    // 1. Gather all conversation history (spoken transcripts + chat messages)
     const dialogueLines = [
       ...transcript.map(t => ({ speaker: t.speaker, text: t.text })),
       ...messages.filter(m => !m.isSystem).map(m => ({ speaker: m.sender, text: m.text }))
     ]
 
-    try {
-      // Try calling backend server if available
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 2000)
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    if (isLocal) {
+      try {
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 2000)
 
-      const response = await fetch('http://localhost:5000/api/ai/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          transcript: transcript,
-          messages: messages,
-          roomName: roomId
-        }),
-        signal: controller.signal
-      })
-      clearTimeout(timeoutId)
+        const response = await fetch('http://localhost:5000/api/ai/summarize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transcript: transcript,
+            messages: messages,
+            roomName: roomId
+          }),
+          signal: controller.signal
+        })
+        clearTimeout(timeoutId)
 
-      if (response.ok) {
-        const data = await response.json()
-        if (data.summary) setAiSummary(data.summary)
-        if (data.keyDecisions) setKeyDecisions(data.keyDecisions)
-        if (data.actionItems) setActionItems(data.actionItems)
-        setIsGeneratingAI(false)
-        return
-      }
-    } catch (_) {
-      // Backend is offline or blocked by Vercel HTTPS mixed-content policy
+        if (response.ok) {
+          const data = await response.json()
+          if (data.summary) setAiSummary(data.summary)
+          if (data.keyDecisions) setKeyDecisions(data.keyDecisions)
+          if (data.actionItems) setActionItems(data.actionItems)
+          setIsGeneratingAI(false)
+          return
+        }
+      } catch (_) {}
     }
 
-    // 2. Intelligent Built-in Client NLP Engine (guarantees 100% instant response on Vercel)
-    await new Promise(resolve => setTimeout(resolve, 800)) // smooth realistic AI analysis feel
+    // Client NLP Engine (guarantees instantaneous response anywhere on Vercel)
+    await new Promise(resolve => setTimeout(resolve, 800))
 
     let generatedSummary = ''
     let generatedDecisions = []
     let generatedActions = []
 
     if (dialogueLines.length === 0) {
-      generatedSummary = `Room "${roomId || 'IntelliMeet'}" session is active. Agenda highlights: Reviewing full-stack architecture, verifying WebRTC camera/audio streaming, and validating autonomous AI minutes extraction. (💡 Pro-tip: Speak into the mic or type messages in chat to see live AI analysis of your actual words!)`
+      generatedSummary = `Room "${roomId || 'IntelliMeet'}" session is active with ${participantsCount} participant(s). Agenda highlights: Reviewing full-stack architecture, verifying PeerJS WebRTC video streaming, and validating autonomous AI minutes extraction. (💡 Pro-tip: Speak into the mic or type messages in chat to see live AI analysis of your actual words!)`
       generatedDecisions = [
         'Verified WebRTC peer streaming and camera/microphone hardware status',
         'Confirmed sprint milestones, live cloud deployment, and team deliverables'
@@ -481,12 +826,17 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
     setTimeout(() => setCopiedNotes(false), 2500)
   }
 
-  // Meeting Lifecycle Actions
+  // ========================================================
+  // 9. MEETING LIFECYCLE ACTIONS
+  // ========================================================
   const handleStartNewMeeting = () => {
-    if (!userName.trim()) return alert('Please enter your name!')
+    if (!userName.trim()) {
+      alert('Please enter your name first!')
+      return
+    }
+    localStorage.setItem('intellimeet_username', userName.trim())
     const randomCode = 'meet-' + Math.random().toString(36).substring(2, 7)
     setRoomId(randomCode)
-    setParticipantsCount(1)
     setPeers([])
     setMessages([])
     setTranscript([])
@@ -494,10 +844,16 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
   }
 
   const handleJoinMeeting = (e) => {
-    e.preventDefault()
-    if (!userName.trim()) return alert('Please enter your name!')
-    if (!roomId.trim()) return alert('Please enter a room code!')
-    setParticipantsCount(1)
+    if (e && e.preventDefault) e.preventDefault()
+    if (!userName.trim()) {
+      alert('Please enter your name first!')
+      return
+    }
+    if (!roomId.trim()) {
+      alert('Please enter a room code or click an invite link!')
+      return
+    }
+    localStorage.setItem('intellimeet_username', userName.trim())
     setPeers([])
     setMessages([])
     setTranscript([])
@@ -506,19 +862,18 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
 
   const handleLeaveMeeting = async () => {
     if (confirm('Are you sure you want to leave the meeting?')) {
-      // 1. Prepare meeting archive record
       const meetingRecord = {
         id: Date.now().toString(),
         roomId: roomId || 'sprint-room',
         hostName: userName || 'Host',
-        participants: [userName || 'Host'],
+        participants: [userName || 'Host', ...peers.map(p => p.name)],
         summary: aiSummary,
         keyDecisions: keyDecisions,
         actionItems: actionItems,
         createdAt: new Date().toISOString()
       }
 
-      // Try saving to backend MongoDB
+      // Try saving to backend MongoDB if online
       try {
         fetch('http://localhost:5000/api/meetings', {
           method: 'POST',
@@ -527,22 +882,31 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
         }).catch(() => {})
       } catch (_) {}
 
-      // Always save to localStorage (guarantees meeting history works on Vercel)
+      // Always save to localStorage (guarantees persistence on Vercel & mobile)
       try {
         const localList = JSON.parse(localStorage.getItem('intellimeet_past_meetings') || '[]')
         localStorage.setItem('intellimeet_past_meetings', JSON.stringify([meetingRecord, ...localList].slice(0, 10)))
       } catch (_) {}
 
-      // 2. Cleanup hardware
+      // Hardware and connection cleanup
       if (stream) {
         stream.getTracks().forEach(track => track.stop())
         setStream(null)
+      }
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach(track => track.stop())
+        screenStreamRef.current = null
+      }
+      setIsScreenSharing(false)
+
+      if (peerInstanceRef.current) {
+        try { peerInstanceRef.current.destroy() } catch (_) {}
+        peerInstanceRef.current = null
       }
       if (socketRef.current) {
         socketRef.current.disconnect()
       }
 
-      // 3. Navigate back to Home
       setCurrentScreen('home')
     }
   }
@@ -553,19 +917,30 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
 
     const newMsg = {
       id: Date.now() + Math.random(),
-      sender: userName || 'Anonymous',
-      socketId: socketRef.current?.id,
+      sender: userName || 'Participant',
+      peerId: peerInstanceRef.current?.id || 'self',
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      text: inputText
+      text: inputText.trim()
     }
 
-    if (socketRef.current) {
+    // 1. Add locally
+    setMessages(prev => [...prev, newMsg])
+
+    // 2. Broadcast to all WebRTC peers via PeerJS data channel
+    Object.values(connectionsRef.current).forEach(conn => {
+      if (conn && conn.open) {
+        try {
+          conn.send({ type: 'chat', message: newMsg })
+        } catch (_) {}
+      }
+    })
+
+    // 3. Emit via socket if running
+    if (socketRef.current?.connected) {
       socketRef.current.emit('send-message', {
         roomId: roomId,
         message: newMsg
       })
-    } else {
-      setMessages(prev => [...prev, newMsg])
     }
 
     setInputText('')
@@ -577,10 +952,21 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
     ))
   }
 
+  // Copies the full join link with ?room= parameter
   const handleCopyLink = () => {
-    navigator.clipboard.writeText(roomId)
-    setCopiedLink(true)
-    setTimeout(() => setCopiedLink(false), 2000)
+    const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(inviteUrl)
+        .then(() => {
+          setCopiedLink(true)
+          setTimeout(() => setCopiedLink(false), 2500)
+        })
+        .catch(() => {
+          prompt('Copy this meeting link and send to your friend:', inviteUrl)
+        })
+    } else {
+      prompt('Copy this meeting link and send to your friend:', inviteUrl)
+    }
   }
 
   // ========================================================
@@ -615,21 +1001,41 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
           </p>
 
           <div className="join-card">
+            {hasInviteFromUrl && (
+              <div className="invite-banner">
+                <div className="invite-banner-icon">👋</div>
+                <div className="invite-banner-text">
+                  <strong>You've been invited to join a meeting!</strong>
+                  <span>Room Code: <code>{roomId}</code></span>
+                </div>
+              </div>
+            )}
+
             <div className="form-group">
-              <label className="form-label">Your Name</label>
+              <label className="form-label">Your Name *</label>
               <input
                 type="text"
                 className="form-input"
-                placeholder="e.g. Anumol Vijayan"
+                placeholder="Enter your name (e.g. Rahul, Mentor, Friend)"
                 value={userName}
-                onChange={(e) => setUserName(e.target.value)}
+                onChange={(e) => {
+                  setUserName(e.target.value)
+                  localStorage.setItem('intellimeet_username', e.target.value)
+                }}
               />
             </div>
 
-            <button className="btn-primary" onClick={handleStartNewMeeting}>
-              <VideoIcon size={18} />
-              <span>Start New Meeting</span>
-            </button>
+            {hasInviteFromUrl ? (
+              <button className="btn-primary" onClick={handleJoinMeeting} style={{ marginBottom: '14px' }}>
+                <VideoIcon size={18} />
+                <span>Join Meeting ({roomId})</span>
+              </button>
+            ) : (
+              <button className="btn-primary" onClick={handleStartNewMeeting}>
+                <VideoIcon size={18} />
+                <span>Start New Meeting</span>
+              </button>
+            )}
 
             <div className="card-divider">
               <span>Or join an existing room</span>
@@ -639,11 +1045,11 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
               <input
                 type="text"
                 className="form-input"
-                placeholder="Enter room code (e.g. sprint-review)"
+                placeholder="Enter room code (e.g. meet-xyz)"
                 value={roomId}
                 onChange={(e) => setRoomId(e.target.value)}
               />
-              <button type="submit" className="btn-secondary">
+              <button type="submit" className="btn-secondary" title="Join Room">
                 <ArrowRight size={18} />
               </button>
             </form>
@@ -652,7 +1058,7 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
           <div className="feature-row">
             <div className="feature-badge">
               <Zap size={16} color="#eab308" />
-              <span>Socket.io Real-time Mesh</span>
+              <span>WebRTC Peer Cloud Mesh</span>
             </div>
             <div className="feature-badge">
               <Captions size={16} color="#38bdf8" />
@@ -783,11 +1189,12 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
 
           <button
             className="btn-ctrl"
-            style={{ width: '36px', height: '36px' }}
+            style={{ width: 'auto', padding: '0 12px', height: '36px', gap: '6px', fontSize: '12px' }}
             onClick={handleCopyLink}
-            title="Copy room code"
+            title="Copy invite link to share with friends"
           >
-            {copiedLink ? <CheckCircle2 size={16} color="#10b981" /> : <Copy size={16} />}
+            {copiedLink ? <CheckCircle2 size={15} color="#10b981" /> : <Copy size={15} />}
+            <span>{copiedLink ? 'Link Copied!' : 'Copy Invite Link'}</span>
           </button>
         </div>
       </header>
@@ -812,12 +1219,12 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
                 />
               ) : (
                 <div className="avatar-placeholder">
-                  {(userName || 'U')[0].toUpperCase()}
+                  {(userName || 'U')[0]?.toUpperCase() || 'U'}
                 </div>
               )}
 
               <div className="card-overlay">
-                <span>{isScreenSharing ? '🖥️ You (Presenting Screen)' : `${userName || 'You'} (Host)`}</span>
+                <span>{isScreenSharing ? '🖥️ You (Presenting Screen)' : `${userName || 'You'} (You)`}</span>
               </div>
 
               <div className="card-status">
@@ -833,19 +1240,23 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
               )}
             </div>
 
-            {/* Real Remote Participants (Dynamically added when someone joins) */}
+            {/* Real Remote Participants (Live WebRTC video feed + audio + dynamic name) */}
             {peers.map((peer) => (
               <div key={peer.id} className="video-card">
-                <div className="avatar-placeholder" style={{ background: 'linear-gradient(135deg, #0ea5e9, #2563eb)' }}>
-                  {(peer.name || 'P')[0].toUpperCase()}
-                </div>
+                {peer.stream ? (
+                  <RemoteVideo stream={peer.stream} />
+                ) : (
+                  <div className="avatar-placeholder" style={{ background: 'linear-gradient(135deg, #0ea5e9, #2563eb)' }}>
+                    {(peer.name || 'P')[0]?.toUpperCase() || 'P'}
+                  </div>
+                )}
                 <div className="card-overlay">
-                  <span>{peer.name}</span>
+                  <span>{peer.name || 'Participant'}</span>
                 </div>
               </div>
             ))}
 
-            {/* If alone in the meeting: Show a clean waiting card instead of a hardcoded person */}
+            {/* If alone in the meeting: Show a clean waiting card with one-click copy invite */}
             {peers.length === 0 && (
               <div className="video-card" style={{ border: '1px dashed #374151', background: 'rgba(17, 24, 39, 0.4)' }}>
                 <div style={{ textAlign: 'center', padding: '24px' }}>
@@ -853,11 +1264,27 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
                     <Users size={24} />
                   </div>
                   <h4 style={{ color: '#e2e8f0', fontSize: '15px', marginBottom: '6px' }}>Waiting for others to join</h4>
-                  <p style={{ color: '#64748b', fontSize: '12px', marginBottom: '14px' }}>Share this meeting code with your team:</p>
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: '#1f2937', padding: '6px 14px', borderRadius: '8px', border: '1px solid #374151' }}>
+                  <p style={{ color: '#64748b', fontSize: '12px', marginBottom: '14px' }}>Share this meeting link with your friend or mentor:</p>
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: '#1f2937', padding: '8px 14px', borderRadius: '8px', border: '1px solid #374151' }}>
                     <strong style={{ color: '#818cf8', fontSize: '13px' }}>{roomId}</strong>
-                    <button onClick={handleCopyLink} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-                      {copiedLink ? <CheckCircle2 size={14} color="#10b981" /> : <Copy size={14} />}
+                    <button
+                      onClick={handleCopyLink}
+                      style={{
+                        background: copiedLink ? '#10b981' : '#6366f1',
+                        border: 'none',
+                        color: 'white',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        padding: '4px 10px',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontWeight: 500
+                      }}
+                    >
+                      {copiedLink ? <CheckCircle2 size={14} /> : <Copy size={14} />}
+                      <span>{copiedLink ? 'Link Copied!' : 'Copy Invite Link'}</span>
                     </button>
                   </div>
                 </div>
@@ -916,11 +1343,11 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
                 {messages.map(msg => (
                   <div
                     key={msg.id}
-                    className={`chat-msg ${msg.isSystem ? 'system' : msg.socketId === socketRef.current?.id ? 'self' : ''}`}
+                    className={`chat-msg ${msg.isSystem ? 'system' : (msg.sender === userName || msg.peerId === peerInstanceRef.current?.id) ? 'self' : ''}`}
                   >
                     {!msg.isSystem && (
                       <div className="chat-sender">
-                        {msg.socketId === socketRef.current?.id ? 'You' : msg.sender}
+                        {(msg.sender === userName || msg.peerId === peerInstanceRef.current?.id) ? 'You' : msg.sender}
                         <span className="chat-time">{msg.time}</span>
                       </div>
                     )}
@@ -937,7 +1364,7 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
                 />
-                <button type="submit" className="send-btn">
+                <button type="submit" className="send-btn" title="Send message">
                   <Send size={16} />
                 </button>
               </form>
@@ -1028,7 +1455,7 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
           <button
             className={`btn-ctrl ${!isMicOn ? 'off' : ''}`}
             onClick={toggleMic}
-            title={isMicOn ? 'Mute' : 'Unmute'}
+            title={isMicOn ? 'Mute Microphone' : 'Unmute Microphone'}
           >
             {isMicOn ? <Mic size={20} /> : <MicOff size={20} />}
           </button>
@@ -1037,7 +1464,7 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
           <button
             className={`btn-ctrl ${!isCamOn ? 'off' : ''}`}
             onClick={toggleCam}
-            title={isCamOn ? 'Video Off' : 'Video On'}
+            title={isCamOn ? 'Turn Video Off' : 'Turn Video On'}
           >
             {isCamOn ? <Video size={20} /> : <VideoOff size={20} />}
           </button>
@@ -1046,7 +1473,7 @@ ${actionItems.map(a => `[${a.completed ? 'X' : ' '}] ${a.text} (${a.assignee || 
           <button
             className={`btn-ctrl ${isTranscribing ? 'active-blue' : ''}`}
             onClick={() => setIsTranscribing(!isTranscribing)}
-            title={isTranscribing ? 'Captions On' : 'Captions Off'}
+            title={isTranscribing ? 'Captions Active' : 'Captions Muted'}
           >
             <Captions size={20} />
           </button>

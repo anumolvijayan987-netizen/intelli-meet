@@ -1076,3 +1076,46 @@ body {
     border-radius: 14px;
   }
 }
+
+/* =========================================
+   INVITE BANNER STYLES (HOME SCREEN)
+   ========================================= */
+.invite-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2));
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  text-align: left;
+}
+
+.invite-banner-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.invite-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  color: #e2e8f0;
+}
+
+.invite-banner-text strong {
+  color: #a5b4fc;
+  font-size: 13px;
+}
+
+.invite-banner-text code {
+  background: #1e1b4b;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #38bdf8;
+  font-family: monospace;
+  font-weight: 600;
+}
